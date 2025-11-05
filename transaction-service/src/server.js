@@ -1089,10 +1089,17 @@
 // /* --------------------- Start Server --------------------- */
 // const port = process.env.PORT || 8082;
 // app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
-
 import express from "express";
+import swaggerUi from "swagger-ui-express";
+import YAML from "yamljs";
+
+
+// existing routes here...
+
 import dotenv from "dotenv";
 import promClient from "prom-client";
+import path from "path";
+import { fileURLToPath } from "url";
 import { pool } from "./db.js";
 import transactionRoutes from "./routes/transactionRoutes.js";
 import { connectQueue, getChannel } from "./messageQueue.js";
@@ -1102,7 +1109,16 @@ import { correlationIdMiddleware } from "./middleware/correlationId.js";
 
 dotenv.config();
 
+// Setup path resolution for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
+
+// 🧠 Load and serve Swagger OpenAPI
+const swaggerDocument = YAML.load(path.join(__dirname, "../openapi.yaml"));
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
 app.use(express.json());
 app.use(correlationIdMiddleware); // 🧩 Add correlation ID early
 
@@ -1112,9 +1128,14 @@ connectQueue()
   .catch((err) => logger.error("❌ RabbitMQ connection error:", err));
 
 /* --------------------- Prometheus Metrics --------------------- */
+
+
 const register = new promClient.Registry();
+
+// Collect default metrics (CPU, memory, etc.)
 promClient.collectDefaultMetrics({ register });
 
+// Custom HTTP request counter
 const httpRequestCounter = new promClient.Counter({
   name: "http_requests_total",
   help: "Total number of HTTP requests",
@@ -1122,6 +1143,7 @@ const httpRequestCounter = new promClient.Counter({
 });
 register.registerMetric(httpRequestCounter);
 
+// Middleware to increment counter
 app.use((req, res, next) => {
   res.on("finish", () => {
     httpRequestCounter.labels(req.method, req.path, res.statusCode).inc();
@@ -1129,11 +1151,25 @@ app.use((req, res, next) => {
   next();
 });
 
+// ✅ Expose /metrics endpoint
+app.get("/metrics", async (req, res) => {
+  try {
+    res.set("Content-Type", register.contentType);
+    res.end(await register.metrics());
+  } catch (err) {
+    res.status(500).end(err);
+  }
+});
+
+
 /* --------------------- Health --------------------- */
 app.get("/health", (req, res) => {
   logger.info({ correlationId: req.correlationId }, "Health check OK");
   res.json({ status: "Transaction Service running" });
 });
+
+/* --------------------- transaction routes check --------------------- */
+app.use("/transactions", transactionRoutes);
 
 /* --------------------- DB Check --------------------- */
 app.get("/db-check", async (req, res) => {
