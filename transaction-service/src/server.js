@@ -443,289 +443,162 @@
 // const port = process.env.PORT || 8082;
 // app.listen(port, () => console.log(`Server running on port ${port}`));
 
-import express from "express";
-import dotenv from "dotenv";
-import promClient from "prom-client";  // ✅ fixed duplicate name
-import { pool } from "./db.js";
-import transactionRoutes from "./routes/transactionRoutes.js";
-import { connectQueue, getChannel } from "./messageQueue.js"; // ✅ single import
+// import { fetchAccountBalanceCB, debitAccount, creditAccount } from "./accountClient.js";
+// import axios from "axios";
+// import express from "express";
+// import dotenv from "dotenv";
+// import promClient from "prom-client";  // ✅ fixed duplicate name
+// import { pool } from "./db.js";
+// import transactionRoutes from "./routes/transactionRoutes.js";
+// import { connectQueue, getChannel } from "./messageQueue.js"; // ✅ single import
 
-dotenv.config();
+// dotenv.config();
 
-const app = express();
-app.use(express.json());
+// const app = express();
+// app.use(express.json());
 
-/* --------------------- Connect to RabbitMQ --------------------- */
-connectQueue()
-  .then(() => console.log("✅ RabbitMQ connected"))
-  .catch((err) => console.error("❌ RabbitMQ connection error:", err));
+// /* --------------------- Connect to RabbitMQ --------------------- */
+// connectQueue()
+//   .then(() => console.log("✅ RabbitMQ connected"))
+//   .catch((err) => console.error("❌ RabbitMQ connection error:", err));
 
-/* --------------------- Prometheus Metrics --------------------- */
-const register = new promClient.Registry();
+// /* --------------------- Prometheus Metrics --------------------- */
+// const register = new promClient.Registry();
 
-// Collect default metrics (CPU, memory, etc.)
-promClient.collectDefaultMetrics({ register });
+// // Collect default metrics (CPU, memory, etc.)
+// promClient.collectDefaultMetrics({ register });
 
-// Custom counter for HTTP requests
-const httpRequestCounter = new promClient.Counter({
-  name: "http_requests_total",
-  help: "Total number of HTTP requests",
-  labelNames: ["method", "route", "status_code"],
-});
+// // Custom counter for HTTP requests
+// const httpRequestCounter = new promClient.Counter({
+//   name: "http_requests_total",
+//   help: "Total number of HTTP requests",
+//   labelNames: ["method", "route", "status_code"],
+// });
 
-register.registerMetric(httpRequestCounter);
+// register.registerMetric(httpRequestCounter);
 
-// Middleware to count every request
-app.use((req, res, next) => {
-  res.on("finish", () => {
-    httpRequestCounter.labels(req.method, req.path, res.statusCode).inc();
-  });
-  next();
-});
+// // Middleware to count every request
+// app.use((req, res, next) => {
+//   res.on("finish", () => {
+//     httpRequestCounter.labels(req.method, req.path, res.statusCode).inc();
+//   });
+//   next();
+// });
 
-// Expose metrics
-app.get("/metrics", async (req, res) => {
-  try {
-    res.set("Content-Type", register.contentType);
-    res.end(await register.metrics());
-  } catch (err) {
-    res.status(500).end(err.message);
-  }
-});
+// // Expose metrics
+// app.get("/metrics", async (req, res) => {
+//   try {
+//     res.set("Content-Type", register.contentType);
+//     res.end(await register.metrics());
+//   } catch (err) {
+//     res.status(500).end(err.message);
+//   }
+// });
 
-/* --------------------- Health Check --------------------- */
-app.get("/health", (req, res) => {
-  res.json({ status: "Transaction Service running" });
-});
+// /* --------------------- Health Check --------------------- */
+// app.get("/health", (req, res) => {
+//   res.json({ status: "Transaction Service running" });
+// });
 
-/* --------------------- DB Connectivity Check --------------------- */
-app.get("/db-check", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT NOW() AS current_time");
-    res.json({
-      success: true,
-      db_time: result.rows[0].current_time,
-    });
-  } catch (err) {
-    console.error("DB error:", err);
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
-  }
-});
+// /* --------------------- DB Connectivity Check --------------------- */
+// app.get("/db-check", async (req, res) => {
+//   try {
+//     const result = await pool.query("SELECT NOW() AS current_time");
+//     res.json({
+//       success: true,
+//       db_time: result.rows[0].current_time,
+//     });
+//   } catch (err) {
+//     console.error("DB error:", err);
+//     res.status(500).json({
+//       success: false,
+//       message: err.message,
+//     });
+//   }
+// });
 
-/* --------------------- Deposit API (Idempotent) --------------------- */
-app.post("/transactions/deposit", async (req, res) => {
-  const { account_id, amount } = req.body;
-  const idempotencyKey = req.headers["idempotency-key"];
-
-  if (!account_id || !amount)
-    return res.status(400).json({ success: false, message: "account_id and amount are required" });
-
-  if (!idempotencyKey)
-    return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
-
-  try {
-    const existingKey = await pool.query(
-      "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
-      [idempotencyKey]
-    );
-
-    if (existingKey.rows.length > 0) {
-      const existingTxn = await pool.query(
-        "SELECT * FROM transactions WHERE txn_id = $1",
-        [existingKey.rows[0].txn_id]
-      );
-      return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
-    }
-
-    const ref = `REF-${Date.now()}`;
-    const counterparty = "SYSTEM:Deposit";
-
-    const insertTxn = await pool.query(
-      `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
-       VALUES ($1, $2, 'DEPOSIT', $3, $4)
-       RETURNING *;`,
-      [account_id, amount, counterparty, ref]
-    );
-
-    const txn = insertTxn.rows[0];
-    await pool.query(
-      `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
-      [idempotencyKey, txn.txn_id]
-    );
-
-    // 🐇 Publish to RabbitMQ
-    try {
-      const channel = getChannel();
-      await channel.assertQueue("transaction_events");
-      channel.sendToQueue(
-        "transaction_events",
-        Buffer.from(JSON.stringify({ type: "DEPOSIT_CREATED", transaction: txn }))
-      );
-      console.log("📤 Sent DEPOSIT_CREATED event to RabbitMQ");
-    } catch (mqErr) {
-      console.error("RabbitMQ publish error:", mqErr.message);
-    }
-
-    res.status(201).json({ success: true, transaction: txn });
-  } catch (err) {
-    console.error("Deposit error:", err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/* --------------------- Transfer API (Idempotent + Business Rules) --------------------- */
-app.post("/transactions/transfer", async (req, res) => {
-  const { from_account_id, to_account_id, amount } = req.body;
-  const idempotencyKey = req.headers["idempotency-key"];
-
-  if (!from_account_id || !to_account_id || !amount) {
-    return res.status(400).json({
-      success: false,
-      message: "from_account_id, to_account_id, and amount are required",
-    });
-  }
-
-  if (!idempotencyKey) {
-    return res
-      .status(400)
-      .json({ success: false, message: "Missing Idempotency-Key header" });
-  }
-
-  const client = await pool.connect();
-  try {
-    /* -------------------- Idempotency Check -------------------- */
-    const existingKey = await client.query(
-      "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
-      [idempotencyKey]
-    );
-
-    if (existingKey.rows.length > 0) {
-      const existingTxn = await client.query(
-        "SELECT * FROM transactions WHERE txn_id = $1",
-        [existingKey.rows[0].txn_id]
-      );
-      return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
-    }
-
-    /* -------------------- Business Rule #1: Frozen Account -------------------- */
-    const frozenAccounts = new Set([999, 1001]); // mock example IDs
-    if (frozenAccounts.has(from_account_id) || frozenAccounts.has(to_account_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Transfer failed: one of the accounts is frozen.",
-      });
-    }
-
-    /* -------------------- Business Rule #2: Daily Limit -------------------- */
-    const DAILY_LIMIT = 200000; // ₹2,00,000
-    const { rows: dailyRows } = await client.query(
-      `SELECT COALESCE(SUM(amount), 0) AS total_today
-       FROM transactions
-       WHERE account_id = $1
-         AND txn_type = 'TRANSFER_OUT'
-         AND DATE(created_at) = CURRENT_DATE`,
-      [from_account_id]
-    );
-    const totalToday = parseFloat(dailyRows[0].total_today || 0);
-    if (totalToday + Number(amount) > DAILY_LIMIT) {
-      return res.status(400).json({
-        success: false,
-        message: `Daily transfer limit exceeded. Limit ₹${DAILY_LIMIT}, used ₹${totalToday}`,
-      });
-    }
-
-    /* -------------------- Business Rule #3: No Overdraft for BASIC -------------------- */
-    // Mock rule: assume "basic" accounts have < ₹10,000 balance
-    const simulatedAccountType = "BASIC";
-    const simulatedBalance = 8000; // mock data for test
-    if (simulatedAccountType === "BASIC" && simulatedBalance < Number(amount)) {
-      return res.status(400).json({
-        success: false,
-        message: "Insufficient balance. Basic accounts cannot overdraft.",
-      });
-    }
-
-    /* -------------------- Begin Transaction -------------------- */
-    await client.query("BEGIN");
-
-    const outRef = `REF-OUT-${Date.now()}`;
-    const senderTxn = await client.query(
-      `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
-       VALUES ($1, $2, 'TRANSFER_OUT', $3, $4)
-       RETURNING *;`,
-      [from_account_id, amount, `TO:${to_account_id}`, outRef]
-    );
-
-    const inRef = `REF-IN-${Date.now()}`;
-    const receiverTxn = await client.query(
-      `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
-       VALUES ($1, $2, 'TRANSFER_IN', $3, $4)
-       RETURNING *;`,
-      [to_account_id, amount, `FROM:${from_account_id}`, inRef]
-    );
-
-    await client.query(
-      `INSERT INTO idempotency_keys (idempotency_key, txn_id)
-       VALUES ($1, $2);`,
-      [idempotencyKey, senderTxn.rows[0].txn_id]
-    );
-
-    await client.query("COMMIT");
-
-    /* -------------------- Publish RabbitMQ Event -------------------- */
-    try {
-      const channel = getChannel();
-      await channel.assertQueue("transaction_events");
-      channel.sendToQueue(
-        "transaction_events",
-        Buffer.from(
-          JSON.stringify({
-            type: "TRANSFER_COMPLETED",
-            sender: senderTxn.rows[0],
-            receiver: receiverTxn.rows[0],
-          })
-        )
-      );
-      console.log("📤 Sent TRANSFER_COMPLETED event to RabbitMQ");
-    } catch (mqErr) {
-      console.error("RabbitMQ publish error:", mqErr.message);
-    }
-
-    /* -------------------- Respond -------------------- */
-    res.status(201).json({
-      success: true,
-      sender_transaction: senderTxn.rows[0],
-      receiver_transaction: receiverTxn.rows[0],
-    });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("Transfer error:", err);
-    res.status(500).json({ success: false, message: err.message });
-  } finally {
-    client.release();
-  }
-});
-
-
-// /* --------------------- Transfer API (Idempotent) --------------------- */
-// app.post("/transactions/transfer", async (req, res) => {
-//   const { from_account_id, to_account_id, amount } = req.body;
+// /* --------------------- Deposit API (Idempotent) --------------------- */
+// app.post("/transactions/deposit", async (req, res) => {
+//   const { account_id, amount } = req.body;
 //   const idempotencyKey = req.headers["idempotency-key"];
 
-//   if (!from_account_id || !to_account_id || !amount)
-//     return res.status(400).json({
-//       success: false,
-//       message: "from_account_id, to_account_id, and amount are required",
-//     });
+//   if (!account_id || !amount)
+//     return res.status(400).json({ success: false, message: "account_id and amount are required" });
 
 //   if (!idempotencyKey)
 //     return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
 
+//   try {
+//     const existingKey = await pool.query(
+//       "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
+//       [idempotencyKey]
+//     );
+
+//     if (existingKey.rows.length > 0) {
+//       const existingTxn = await pool.query(
+//         "SELECT * FROM transactions WHERE txn_id = $1",
+//         [existingKey.rows[0].txn_id]
+//       );
+//       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
+//     }
+
+//     const ref = `REF-${Date.now()}`;
+//     const counterparty = "SYSTEM:Deposit";
+
+//     const insertTxn = await pool.query(
+//       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+//        VALUES ($1, $2, 'DEPOSIT', $3, $4)
+//        RETURNING *;`,
+//       [account_id, amount, counterparty, ref]
+//     );
+
+//     const txn = insertTxn.rows[0];
+//     await pool.query(
+//       `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
+//       [idempotencyKey, txn.txn_id]
+//     );
+
+//     // 🐇 Publish to RabbitMQ
+//     try {
+//       const channel = getChannel();
+//       await channel.assertQueue("transaction_events");
+//       channel.sendToQueue(
+//         "transaction_events",
+//         Buffer.from(JSON.stringify({ type: "DEPOSIT_CREATED", transaction: txn }))
+//       );
+//       console.log("📤 Sent DEPOSIT_CREATED event to RabbitMQ");
+//     } catch (mqErr) {
+//       console.error("RabbitMQ publish error:", mqErr.message);
+//     }
+
+//     res.status(201).json({ success: true, transaction: txn });
+//   } catch (err) {
+//     console.error("Deposit error:", err);
+//     res.status(500).json({ success: false, message: err.message });
+//   }
+// });
+
+// /* --------------------- Transfer API (Idempotent + Business Rules) --------------------- */
+// app.post("/transactions/transfer", async (req, res) => {
+//   const { from_account_id, to_account_id, amount } = req.body;
+//   const idempotencyKey = req.headers["idempotency-key"];
+
+//   if (!from_account_id || !to_account_id || !amount) {
+//     return res.status(400).json({
+//       success: false,
+//       message: "from_account_id, to_account_id, and amount are required",
+//     });
+//   }
+
+//   if (!idempotencyKey) {
+//     return res
+//       .status(400)
+//       .json({ success: false, message: "Missing Idempotency-Key header" });
+//   }
+
 //   const client = await pool.connect();
 //   try {
+//     /* -------------------- Idempotency Check -------------------- */
 //     const existingKey = await client.query(
 //       "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
 //       [idempotencyKey]
@@ -739,6 +612,80 @@ app.post("/transactions/transfer", async (req, res) => {
 //       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
 //     }
 
+//     /* -------------------- Business Rule #1: Frozen Account -------------------- */
+//     const frozenAccounts = new Set([999, 1001]); // mock example IDs
+//     if (frozenAccounts.has(from_account_id) || frozenAccounts.has(to_account_id)) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Transfer failed: one of the accounts is frozen.",
+//       });
+//     }
+
+//     /* -------------------- Business Rule #2: Daily Limit -------------------- */
+//     const DAILY_LIMIT = 200000; // ₹2,00,000
+//     const { rows: dailyRows } = await client.query(
+//       `SELECT COALESCE(SUM(amount), 0) AS total_today
+//        FROM transactions
+//        WHERE account_id = $1
+//          AND txn_type = 'TRANSFER_OUT'
+//          AND DATE(created_at) = CURRENT_DATE`,
+//       [from_account_id]
+//     );
+//     const totalToday = parseFloat(dailyRows[0].total_today || 0);
+//     if (totalToday + Number(amount) > DAILY_LIMIT) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `Daily transfer limit exceeded. Limit ₹${DAILY_LIMIT}, used ₹${totalToday}`,
+//       });
+//     }
+
+//     /* -------------------- Business Rule #3: No Overdraft for BASIC -------------------- */
+//     // Mock rule: assume "basic" accounts have < ₹10,000 balance
+//     const simulatedAccountType = "BASIC";
+//     const simulatedBalance = 8000; // mock data for test
+//     if (simulatedAccountType === "BASIC" && simulatedBalance < Number(amount)) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Insufficient balance. Basic accounts cannot overdraft.",
+//       });
+//     }
+
+
+// /* -------------------- Validate & Update Accounts via Account Service -------------------- */
+// try {
+//   const accountServiceUrl = process.env.ACCOUNT_SERVICE_URL || "http://localhost:8083";
+//   console.log("🔍 Checking account with:", `${accountServiceUrl}/accounts/${from_account_id}/balance`);
+
+//   const check = await axios.get(`${accountServiceUrl}/accounts/${from_account_id}/balance`);
+
+//   console.log("✅ Account service response:", check.data);
+
+//   if (check.data.status !== "ACTIVE") {
+//     return res.status(400).json({ success: false, message: "Account not active" });
+//   }
+// } catch (err) {
+//   console.error("❌ Account service error:", err.message);
+
+//   if (err.response) {
+//     console.error("❌ Response status:", err.response.status);
+//     console.error("❌ Response data:", err.response.data);
+//   } else if (err.request) {
+//     console.error("❌ No response received from Account Service");
+//   } else {
+//     console.error("❌ Unexpected error:", err);
+//   }
+
+//   return res.status(400).json({
+//     success: false,
+//     message: "Account Service validation failed",
+//     details: err.message,
+//   });
+// }
+
+
+
+
+//     /* -------------------- Begin Transaction -------------------- */
 //     await client.query("BEGIN");
 
 //     const outRef = `REF-OUT-${Date.now()}`;
@@ -765,7 +712,7 @@ app.post("/transactions/transfer", async (req, res) => {
 
 //     await client.query("COMMIT");
 
-//     // 🐇 Publish to RabbitMQ
+//     /* -------------------- Publish RabbitMQ Event -------------------- */
 //     try {
 //       const channel = getChannel();
 //       await channel.assertQueue("transaction_events");
@@ -784,6 +731,7 @@ app.post("/transactions/transfer", async (req, res) => {
 //       console.error("RabbitMQ publish error:", mqErr.message);
 //     }
 
+//     /* -------------------- Respond -------------------- */
 //     res.status(201).json({
 //       success: true,
 //       sender_transaction: senderTxn.rows[0],
@@ -797,6 +745,339 @@ app.post("/transactions/transfer", async (req, res) => {
 //     client.release();
 //   }
 // });
+
+
+// // /* --------------------- Transfer API (Idempotent) --------------------- */
+// // app.post("/transactions/transfer", async (req, res) => {
+// //   const { from_account_id, to_account_id, amount } = req.body;
+// //   const idempotencyKey = req.headers["idempotency-key"];
+
+// //   if (!from_account_id || !to_account_id || !amount)
+// //     return res.status(400).json({
+// //       success: false,
+// //       message: "from_account_id, to_account_id, and amount are required",
+// //     });
+
+// //   if (!idempotencyKey)
+// //     return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
+
+// //   const client = await pool.connect();
+// //   try {
+// //     const existingKey = await client.query(
+// //       "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
+// //       [idempotencyKey]
+// //     );
+
+// //     if (existingKey.rows.length > 0) {
+// //       const existingTxn = await client.query(
+// //         "SELECT * FROM transactions WHERE txn_id = $1",
+// //         [existingKey.rows[0].txn_id]
+// //       );
+// //       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
+// //     }
+
+// //     await client.query("BEGIN");
+
+// //     const outRef = `REF-OUT-${Date.now()}`;
+// //     const senderTxn = await client.query(
+// //       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+// //        VALUES ($1, $2, 'TRANSFER_OUT', $3, $4)
+// //        RETURNING *;`,
+// //       [from_account_id, amount, `TO:${to_account_id}`, outRef]
+// //     );
+
+// //     const inRef = `REF-IN-${Date.now()}`;
+// //     const receiverTxn = await client.query(
+// //       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+// //        VALUES ($1, $2, 'TRANSFER_IN', $3, $4)
+// //        RETURNING *;`,
+// //       [to_account_id, amount, `FROM:${from_account_id}`, inRef]
+// //     );
+
+// //     await client.query(
+// //       `INSERT INTO idempotency_keys (idempotency_key, txn_id)
+// //        VALUES ($1, $2);`,
+// //       [idempotencyKey, senderTxn.rows[0].txn_id]
+// //     );
+
+// //     await client.query("COMMIT");
+
+// //     // 🐇 Publish to RabbitMQ
+// //     try {
+// //       const channel = getChannel();
+// //       await channel.assertQueue("transaction_events");
+// //       channel.sendToQueue(
+// //         "transaction_events",
+// //         Buffer.from(
+// //           JSON.stringify({
+// //             type: "TRANSFER_COMPLETED",
+// //             sender: senderTxn.rows[0],
+// //             receiver: receiverTxn.rows[0],
+// //           })
+// //         )
+// //       );
+// //       console.log("📤 Sent TRANSFER_COMPLETED event to RabbitMQ");
+// //     } catch (mqErr) {
+// //       console.error("RabbitMQ publish error:", mqErr.message);
+// //     }
+
+// //     res.status(201).json({
+// //       success: true,
+// //       sender_transaction: senderTxn.rows[0],
+// //       receiver_transaction: receiverTxn.rows[0],
+// //     });
+// //   } catch (err) {
+// //     await client.query("ROLLBACK");
+// //     console.error("Transfer error:", err);
+// //     res.status(500).json({ success: false, message: err.message });
+// //   } finally {
+// //     client.release();
+// //   }
+// // });
+
+// /* --------------------- Transactions Route --------------------- */
+// app.use("/transactions", transactionRoutes);
+
+// /* --------------------- Start Server --------------------- */
+// const port = process.env.PORT || 8082;
+// app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+
+import express from "express";
+import dotenv from "dotenv";
+import promClient from "prom-client";
+import { pool } from "./db.js";
+import transactionRoutes from "./routes/transactionRoutes.js";
+import { connectQueue, getChannel } from "./messageQueue.js";
+import { fetchAccountBalanceCB, debitAccount, creditAccount } from "./accountClient.js";
+
+dotenv.config();
+
+const app = express();
+app.use(express.json());
+
+/* --------------------- Connect to RabbitMQ --------------------- */
+connectQueue()
+  .then(() => console.log("✅ RabbitMQ connected"))
+  .catch((err) => console.error("❌ RabbitMQ connection error:", err));
+
+/* --------------------- Prometheus Metrics --------------------- */
+const register = new promClient.Registry();
+promClient.collectDefaultMetrics({ register });
+
+const httpRequestCounter = new promClient.Counter({
+  name: "http_requests_total",
+  help: "Total number of HTTP requests",
+  labelNames: ["method", "route", "status_code"],
+});
+register.registerMetric(httpRequestCounter);
+
+app.use((req, res, next) => {
+  res.on("finish", () => {
+    httpRequestCounter.labels(req.method, req.path, res.statusCode).inc();
+  });
+  next();
+});
+
+app.get("/metrics", async (req, res) => {
+  try {
+    res.set("Content-Type", register.contentType);
+    res.end(await register.metrics());
+  } catch (err) {
+    res.status(500).end(err.message);
+  }
+});
+
+/* --------------------- Health Check --------------------- */
+app.get("/health", (req, res) => {
+  res.json({ status: "Transaction Service running" });
+});
+
+/* --------------------- DB Check --------------------- */
+app.get("/db-check", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT NOW() AS current_time");
+    res.json({ success: true, db_time: result.rows[0].current_time });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* --------------------- Deposit API --------------------- */
+app.post("/transactions/deposit", async (req, res) => {
+  const { account_id, amount } = req.body;
+  const idempotencyKey = req.headers["idempotency-key"];
+
+  if (!account_id || !amount)
+    return res.status(400).json({ success: false, message: "account_id and amount are required" });
+  if (!idempotencyKey)
+    return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
+
+  try {
+    const existingKey = await pool.query(
+      "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
+      [idempotencyKey]
+    );
+
+    if (existingKey.rows.length > 0) {
+      const existingTxn = await pool.query(
+        "SELECT * FROM transactions WHERE txn_id = $1",
+        [existingKey.rows[0].txn_id]
+      );
+      return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
+    }
+
+    // ✅ Perform DB insert
+    const ref = `REF-${Date.now()}`;
+    const counterparty = "SYSTEM:Deposit";
+
+    const insertTxn = await pool.query(
+      `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+       VALUES ($1, $2, 'DEPOSIT', $3, $4)
+       RETURNING *;`,
+      [account_id, amount, counterparty, ref]
+    );
+    const txn = insertTxn.rows[0];
+
+    await pool.query(
+      `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
+      [idempotencyKey, txn.txn_id]
+    );
+
+    // ✅ Publish event
+    try {
+      const channel = getChannel();
+      await channel.assertQueue("transaction_events");
+      channel.sendToQueue(
+        "transaction_events",
+        Buffer.from(JSON.stringify({ type: "DEPOSIT_CREATED", transaction: txn }))
+      );
+      console.log("📤 Sent DEPOSIT_CREATED event to RabbitMQ");
+    } catch (mqErr) {
+      console.error("RabbitMQ publish error:", mqErr.message);
+    }
+
+    res.status(201).json({ success: true, transaction: txn });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/* --------------------- Transfer API (Resilient + Business Rules) --------------------- */
+app.post("/transactions/transfer", async (req, res) => {
+  const { from_account_id, to_account_id, amount } = req.body;
+  const idempotencyKey = req.headers["idempotency-key"];
+
+  if (!from_account_id || !to_account_id || !amount)
+    return res.status(400).json({
+      success: false,
+      message: "from_account_id, to_account_id, and amount are required",
+    });
+  if (!idempotencyKey)
+    return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
+
+  const client = await pool.connect();
+  try {
+    // Idempotency check
+    const existingKey = await client.query(
+      "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
+      [idempotencyKey]
+    );
+    if (existingKey.rows.length > 0) {
+      const existingTxn = await client.query(
+        "SELECT * FROM transactions WHERE txn_id = $1",
+        [existingKey.rows[0].txn_id]
+      );
+      return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
+    }
+
+    // Business rule: check via Account Service with circuit breaker
+    console.log("🔍 Checking source account via circuit breaker...");
+    const fromAcc = await fetchAccountBalanceCB.fire(from_account_id);
+    if (!fromAcc.success)
+      return res.status(503).json({ success: false, message: fromAcc.message });
+
+    if (fromAcc.status !== "ACTIVE")
+      return res.status(403).json({ success: false, message: "Account frozen or inactive" });
+
+    if (fromAcc.balance < amount)
+      return res.status(400).json({ success: false, message: "Insufficient balance" });
+
+    // Daily limit rule
+    const DAILY_LIMIT = 200000;
+    const { rows: dailyRows } = await client.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_today
+       FROM transactions
+       WHERE account_id = $1
+         AND txn_type = 'TRANSFER_OUT'
+         AND DATE(created_at) = CURRENT_DATE`,
+      [from_account_id]
+    );
+    const totalToday = parseFloat(dailyRows[0].total_today || 0);
+    if (totalToday + Number(amount) > DAILY_LIMIT)
+      return res.status(400).json({
+        success: false,
+        message: `Daily transfer limit exceeded (₹${DAILY_LIMIT})`,
+      });
+
+    // ✅ Debit/Credit via Account Service (resilient)
+    await debitAccount(from_account_id, amount);
+    await creditAccount(to_account_id, amount);
+
+    await client.query("BEGIN");
+
+    const outRef = `REF-OUT-${Date.now()}`;
+    const senderTxn = await client.query(
+      `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+       VALUES ($1, $2, 'TRANSFER_OUT', $3, $4)
+       RETURNING *;`,
+      [from_account_id, amount, `TO:${to_account_id}`, outRef]
+    );
+
+    const inRef = `REF-IN-${Date.now()}`;
+    const receiverTxn = await client.query(
+      `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+       VALUES ($1, $2, 'TRANSFER_IN', $3, $4)
+       RETURNING *;`,
+      [to_account_id, amount, `FROM:${from_account_id}`, inRef]
+    );
+
+    await client.query(
+      `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
+      [idempotencyKey, senderTxn.rows[0].txn_id]
+    );
+    await client.query("COMMIT");
+
+    // Publish event
+    try {
+      const channel = getChannel();
+      await channel.assertQueue("transaction_events");
+      channel.sendToQueue(
+        "transaction_events",
+        Buffer.from(
+          JSON.stringify({
+            type: "TRANSFER_COMPLETED",
+            sender: senderTxn.rows[0],
+            receiver: receiverTxn.rows[0],
+          })
+        )
+      );
+      console.log("📤 Sent TRANSFER_COMPLETED event to RabbitMQ");
+    } catch (mqErr) {
+      console.error("RabbitMQ publish error:", mqErr.message);
+    }
+
+    res.status(201).json({
+      success: true,
+      sender_transaction: senderTxn.rows[0],
+      receiver_transaction: receiverTxn.rows[0],
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ success: false, message: err.message });
+  } finally {
+    client.release();
+  }
+});
 
 /* --------------------- Transactions Route --------------------- */
 app.use("/transactions", transactionRoutes);

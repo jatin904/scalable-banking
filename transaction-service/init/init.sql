@@ -84,3 +84,17 @@ BEGIN
   END;
 END;
 $$;
+
+-- ✅ Fix sequence sync after CSV import
+DO
+$$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_class
+        WHERE relname = 'transactions_txn_id_seq'
+    ) THEN
+        RAISE NOTICE '🔧 Adjusting transactions_txn_id_seq to match current max(txn_id)';
+        PERFORM setval('transactions_txn_id_seq', (SELECT COALESCE(MAX(txn_id), 0) + 1 FROM transactions));
+    END IF;
+END;
+$$;

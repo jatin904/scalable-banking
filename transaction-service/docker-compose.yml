@@ -99,6 +99,60 @@
 # volumes:
 #   txn_data:
 
+# version: "3.9"
+
+# services:
+#   transaction-db:
+#     image: postgres:16
+#     environment:
+#       - POSTGRES_USER=txn_user
+#       - POSTGRES_PASSWORD=txn_pass
+#       - POSTGRES_DB=transaction_db
+#     ports:
+#       - "5434:5432"
+#     volumes:
+#       # 🟢 Persist DB data
+#       - txn_data:/var/lib/postgresql/data
+#       # 🟢 Mount the init folder (contains init.sql + transactions.csv)
+#       - ./init:/docker-entrypoint-initdb.d
+
+#   rabbitmq:
+#     image: rabbitmq:3-management
+#     ports:
+#       - "5672:5672"
+#       - "15672:15672"
+#     environment:
+#       RABBITMQ_DEFAULT_USER: guest
+#       RABBITMQ_DEFAULT_PASS: guest
+
+#   transaction-service:
+#     build: .
+#     ports:
+#       - "8082:8082"
+#     environment:
+#       - PORT=8082
+#       - PGHOST=transaction-db
+#       - PGUSER=txn_user
+#       - PGPASSWORD=txn_pass
+#       - PGDATABASE=transaction_db
+#       - PGPORT=5432
+#       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+#     depends_on:
+#       - transaction-db
+#       - rabbitmq
+#     command: npm run start
+#   account-service:
+#     build: ../account-service
+#     ports:
+#       - "8083:8083"
+#     environment:
+#       - PORT=8083
+#     command: npm start
+
+
+# volumes:
+#   txn_data:
+
 version: "3.9"
 
 services:
@@ -125,6 +179,26 @@ services:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
 
+  account-service:
+    build: ../account-service
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+    command: npm start
+
+  notification-service:
+    build: ../notification-service
+    ports:
+      - "8084:8084"
+    environment:
+      - PORT=8084
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      - rabbitmq
+    command: node server.js
+
+
   transaction-service:
     build: .
     ports:
@@ -136,19 +210,13 @@ services:
       - PGPASSWORD=txn_pass
       - PGDATABASE=transaction_db
       - PGPORT=5432
+      - ACCOUNT_SERVICE_URL=http://account-service:8083
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
     depends_on:
       - transaction-db
       - rabbitmq
+      - account-service
     command: npm run start
-  account-service:
-    build: ../account-service
-    ports:
-      - "8083:8083"
-    environment:
-      - PORT=8083
-    command: npm start
-
 
 volumes:
   txn_data:
