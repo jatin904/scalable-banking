@@ -841,6 +841,254 @@
 // /* --------------------- Start Server --------------------- */
 // const port = process.env.PORT || 8082;
 // app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+// import logger from "./logger.js";
+// import { correlationIdMiddleware } from "./middleware/correlationId.js";
+
+// app.use(correlationIdMiddleware);
+
+// import express from "express";
+// import dotenv from "dotenv";
+// import promClient from "prom-client";
+// import { pool } from "./db.js";
+// import transactionRoutes from "./routes/transactionRoutes.js";
+// import { connectQueue, getChannel } from "./messageQueue.js";
+// import { fetchAccountBalanceCB, debitAccount, creditAccount } from "./accountClient.js";
+
+// dotenv.config();
+
+// const app = express();
+// app.use(express.json());
+
+// /* --------------------- Connect to RabbitMQ --------------------- */
+// connectQueue()
+//   .then(() => console.log("✅ RabbitMQ connected"))
+//   .catch((err) => console.error("❌ RabbitMQ connection error:", err));
+
+// /* --------------------- Prometheus Metrics --------------------- */
+// const register = new promClient.Registry();
+// promClient.collectDefaultMetrics({ register });
+
+// const httpRequestCounter = new promClient.Counter({
+//   name: "http_requests_total",
+//   help: "Total number of HTTP requests",
+//   labelNames: ["method", "route", "status_code"],
+// });
+// register.registerMetric(httpRequestCounter);
+
+// app.use((req, res, next) => {
+//   res.on("finish", () => {
+//     httpRequestCounter.labels(req.method, req.path, res.statusCode).inc();
+//   });
+//   next();
+// });
+
+// app.get("/metrics", async (req, res) => {
+//   try {
+//     res.set("Content-Type", register.contentType);
+//     res.end(await register.metrics());
+//   } catch (err) {
+//     res.status(500).end(err.message);
+//   }
+// });
+
+// /* --------------------- Health Check --------------------- */
+// app.get("/health", (req, res) => {
+//   res.json({ status: "Transaction Service running" });
+// });
+
+// /* --------------------- DB Check --------------------- */
+// app.get("/db-check", async (req, res) => {
+//   try {
+//     const result = await pool.query("SELECT NOW() AS current_time");
+//     res.json({ success: true, db_time: result.rows[0].current_time });
+//   } catch (err) {
+//     res.status(500).json({ success: false, message: err.message });
+//   }
+// });
+
+// /* --------------------- Deposit API --------------------- */
+// app.post("/transactions/deposit", async (req, res) => {
+//   const { account_id, amount } = req.body;
+//   const idempotencyKey = req.headers["idempotency-key"];
+
+//   if (!account_id || !amount)
+//     return res.status(400).json({ success: false, message: "account_id and amount are required" });
+//   if (!idempotencyKey)
+//     return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
+
+//   try {
+//     const existingKey = await pool.query(
+//       "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
+//       [idempotencyKey]
+//     );
+
+//     if (existingKey.rows.length > 0) {
+//       const existingTxn = await pool.query(
+//         "SELECT * FROM transactions WHERE txn_id = $1",
+//         [existingKey.rows[0].txn_id]
+//       );
+//       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
+//     }
+
+//     // ✅ Perform DB insert
+//     const ref = `REF-${Date.now()}`;
+//     const counterparty = "SYSTEM:Deposit";
+
+//     const insertTxn = await pool.query(
+//       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+//        VALUES ($1, $2, 'DEPOSIT', $3, $4)
+//        RETURNING *;`,
+//       [account_id, amount, counterparty, ref]
+//     );
+//     const txn = insertTxn.rows[0];
+
+//     await pool.query(
+//       `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
+//       [idempotencyKey, txn.txn_id]
+//     );
+
+//     // ✅ Publish event
+//     try {
+//       const channel = getChannel();
+//       await channel.assertQueue("transaction_events");
+//       channel.sendToQueue(
+//         "transaction_events",
+//         Buffer.from(JSON.stringify({ type: "DEPOSIT_CREATED", transaction: txn }))
+//       );
+//       console.log("📤 Sent DEPOSIT_CREATED event to RabbitMQ");
+//     } catch (mqErr) {
+//       console.error("RabbitMQ publish error:", mqErr.message);
+//     }
+
+//     res.status(201).json({ success: true, transaction: txn });
+//   } catch (err) {
+//     res.status(500).json({ success: false, message: err.message });
+//   }
+// });
+
+// /* --------------------- Transfer API (Resilient + Business Rules) --------------------- */
+// app.post("/transactions/transfer", async (req, res) => {
+//   const { from_account_id, to_account_id, amount } = req.body;
+//   const idempotencyKey = req.headers["idempotency-key"];
+
+//   if (!from_account_id || !to_account_id || !amount)
+//     return res.status(400).json({
+//       success: false,
+//       message: "from_account_id, to_account_id, and amount are required",
+//     });
+//   if (!idempotencyKey)
+//     return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
+
+//   const client = await pool.connect();
+//   try {
+//     // Idempotency check
+//     const existingKey = await client.query(
+//       "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
+//       [idempotencyKey]
+//     );
+//     if (existingKey.rows.length > 0) {
+//       const existingTxn = await client.query(
+//         "SELECT * FROM transactions WHERE txn_id = $1",
+//         [existingKey.rows[0].txn_id]
+//       );
+//       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
+//     }
+
+//     // Business rule: check via Account Service with circuit breaker
+//     console.log("🔍 Checking source account via circuit breaker...");
+//     const fromAcc = await fetchAccountBalanceCB.fire(from_account_id);
+//     if (!fromAcc.success)
+//       return res.status(503).json({ success: false, message: fromAcc.message });
+
+//     if (fromAcc.status !== "ACTIVE")
+//       return res.status(403).json({ success: false, message: "Account frozen or inactive" });
+
+//     if (fromAcc.balance < amount)
+//       return res.status(400).json({ success: false, message: "Insufficient balance" });
+
+//     // Daily limit rule
+//     const DAILY_LIMIT = 200000;
+//     const { rows: dailyRows } = await client.query(
+//       `SELECT COALESCE(SUM(amount), 0) AS total_today
+//        FROM transactions
+//        WHERE account_id = $1
+//          AND txn_type = 'TRANSFER_OUT'
+//          AND DATE(created_at) = CURRENT_DATE`,
+//       [from_account_id]
+//     );
+//     const totalToday = parseFloat(dailyRows[0].total_today || 0);
+//     if (totalToday + Number(amount) > DAILY_LIMIT)
+//       return res.status(400).json({
+//         success: false,
+//         message: `Daily transfer limit exceeded (₹${DAILY_LIMIT})`,
+//       });
+
+//     // ✅ Debit/Credit via Account Service (resilient)
+//     await debitAccount(from_account_id, amount);
+//     await creditAccount(to_account_id, amount);
+
+//     await client.query("BEGIN");
+
+//     const outRef = `REF-OUT-${Date.now()}`;
+//     const senderTxn = await client.query(
+//       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+//        VALUES ($1, $2, 'TRANSFER_OUT', $3, $4)
+//        RETURNING *;`,
+//       [from_account_id, amount, `TO:${to_account_id}`, outRef]
+//     );
+
+//     const inRef = `REF-IN-${Date.now()}`;
+//     const receiverTxn = await client.query(
+//       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+//        VALUES ($1, $2, 'TRANSFER_IN', $3, $4)
+//        RETURNING *;`,
+//       [to_account_id, amount, `FROM:${from_account_id}`, inRef]
+//     );
+
+//     await client.query(
+//       `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
+//       [idempotencyKey, senderTxn.rows[0].txn_id]
+//     );
+//     await client.query("COMMIT");
+
+//     // Publish event
+//     try {
+//       const channel = getChannel();
+//       await channel.assertQueue("transaction_events");
+//       channel.sendToQueue(
+//         "transaction_events",
+//         Buffer.from(
+//           JSON.stringify({
+//             type: "TRANSFER_COMPLETED",
+//             sender: senderTxn.rows[0],
+//             receiver: receiverTxn.rows[0],
+//           })
+//         )
+//       );
+//       console.log("📤 Sent TRANSFER_COMPLETED event to RabbitMQ");
+//     } catch (mqErr) {
+//       console.error("RabbitMQ publish error:", mqErr.message);
+//     }
+
+//     res.status(201).json({
+//       success: true,
+//       sender_transaction: senderTxn.rows[0],
+//       receiver_transaction: receiverTxn.rows[0],
+//     });
+//   } catch (err) {
+//     await client.query("ROLLBACK");
+//     res.status(500).json({ success: false, message: err.message });
+//   } finally {
+//     client.release();
+//   }
+// });
+
+// /* --------------------- Transactions Route --------------------- */
+// app.use("/transactions", transactionRoutes);
+
+// /* --------------------- Start Server --------------------- */
+// const port = process.env.PORT || 8082;
+// app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
 
 import express from "express";
 import dotenv from "dotenv";
@@ -849,16 +1097,19 @@ import { pool } from "./db.js";
 import transactionRoutes from "./routes/transactionRoutes.js";
 import { connectQueue, getChannel } from "./messageQueue.js";
 import { fetchAccountBalanceCB, debitAccount, creditAccount } from "./accountClient.js";
+import logger from "./logger.js";
+import { correlationIdMiddleware } from "./middleware/correlationId.js";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
+app.use(correlationIdMiddleware); // 🧩 Add correlation ID early
 
 /* --------------------- Connect to RabbitMQ --------------------- */
 connectQueue()
-  .then(() => console.log("✅ RabbitMQ connected"))
-  .catch((err) => console.error("❌ RabbitMQ connection error:", err));
+  .then(() => logger.info("✅ RabbitMQ connected"))
+  .catch((err) => logger.error("❌ RabbitMQ connection error:", err));
 
 /* --------------------- Prometheus Metrics --------------------- */
 const register = new promClient.Registry();
@@ -878,17 +1129,9 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get("/metrics", async (req, res) => {
-  try {
-    res.set("Content-Type", register.contentType);
-    res.end(await register.metrics());
-  } catch (err) {
-    res.status(500).end(err.message);
-  }
-});
-
-/* --------------------- Health Check --------------------- */
+/* --------------------- Health --------------------- */
 app.get("/health", (req, res) => {
+  logger.info({ correlationId: req.correlationId }, "Health check OK");
   res.json({ status: "Transaction Service running" });
 });
 
@@ -896,8 +1139,10 @@ app.get("/health", (req, res) => {
 app.get("/db-check", async (req, res) => {
   try {
     const result = await pool.query("SELECT NOW() AS current_time");
+    logger.info({ correlationId: req.correlationId }, "DB connectivity OK");
     res.json({ success: true, db_time: result.rows[0].current_time });
   } catch (err) {
+    logger.error({ correlationId: req.correlationId, error: err.message }, "DB check failed");
     res.status(500).json({ success: false, message: err.message });
   }
 });
@@ -923,10 +1168,10 @@ app.post("/transactions/deposit", async (req, res) => {
         "SELECT * FROM transactions WHERE txn_id = $1",
         [existingKey.rows[0].txn_id]
       );
+      logger.info({ correlationId: req.correlationId }, "Reused existing deposit transaction");
       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
     }
 
-    // ✅ Perform DB insert
     const ref = `REF-${Date.now()}`;
     const counterparty = "SYSTEM:Deposit";
 
@@ -943,29 +1188,36 @@ app.post("/transactions/deposit", async (req, res) => {
       [idempotencyKey, txn.txn_id]
     );
 
-    // ✅ Publish event
+    // 🐇 Publish event with correlationId
     try {
       const channel = getChannel();
       await channel.assertQueue("transaction_events");
-      channel.sendToQueue(
-        "transaction_events",
-        Buffer.from(JSON.stringify({ type: "DEPOSIT_CREATED", transaction: txn }))
-      );
-      console.log("📤 Sent DEPOSIT_CREATED event to RabbitMQ");
+      const event = {
+        type: "DEPOSIT_CREATED",
+        transaction: txn,
+        correlationId: req.correlationId,
+        source: "transaction-service",
+      };
+      channel.sendToQueue("transaction_events", Buffer.from(JSON.stringify(event)), {
+        persistent: true,
+      });
+      logger.info({ correlationId: req.correlationId }, "📤 Sent DEPOSIT_CREATED event");
     } catch (mqErr) {
-      console.error("RabbitMQ publish error:", mqErr.message);
+      logger.error({ correlationId: req.correlationId, error: mqErr.message }, "RabbitMQ publish failed");
     }
 
     res.status(201).json({ success: true, transaction: txn });
   } catch (err) {
+    logger.error({ correlationId: req.correlationId, error: err.message }, "Deposit error");
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-/* --------------------- Transfer API (Resilient + Business Rules) --------------------- */
+/* --------------------- Transfer API --------------------- */
 app.post("/transactions/transfer", async (req, res) => {
   const { from_account_id, to_account_id, amount } = req.body;
   const idempotencyKey = req.headers["idempotency-key"];
+  const correlationId = req.correlationId;
 
   if (!from_account_id || !to_account_id || !amount)
     return res.status(400).json({
@@ -977,7 +1229,6 @@ app.post("/transactions/transfer", async (req, res) => {
 
   const client = await pool.connect();
   try {
-    // Idempotency check
     const existingKey = await client.query(
       "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
       [idempotencyKey]
@@ -987,11 +1238,11 @@ app.post("/transactions/transfer", async (req, res) => {
         "SELECT * FROM transactions WHERE txn_id = $1",
         [existingKey.rows[0].txn_id]
       );
+      logger.info({ correlationId }, "Reused existing transfer transaction");
       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
     }
 
-    // Business rule: check via Account Service with circuit breaker
-    console.log("🔍 Checking source account via circuit breaker...");
+    logger.info({ correlationId }, "🔍 Validating source account via circuit breaker...");
     const fromAcc = await fetchAccountBalanceCB.fire(from_account_id);
     if (!fromAcc.success)
       return res.status(503).json({ success: false, message: fromAcc.message });
@@ -1002,7 +1253,6 @@ app.post("/transactions/transfer", async (req, res) => {
     if (fromAcc.balance < amount)
       return res.status(400).json({ success: false, message: "Insufficient balance" });
 
-    // Daily limit rule
     const DAILY_LIMIT = 200000;
     const { rows: dailyRows } = await client.query(
       `SELECT COALESCE(SUM(amount), 0) AS total_today
@@ -1019,7 +1269,6 @@ app.post("/transactions/transfer", async (req, res) => {
         message: `Daily transfer limit exceeded (₹${DAILY_LIMIT})`,
       });
 
-    // ✅ Debit/Credit via Account Service (resilient)
     await debitAccount(from_account_id, amount);
     await creditAccount(to_account_id, amount);
 
@@ -1047,23 +1296,23 @@ app.post("/transactions/transfer", async (req, res) => {
     );
     await client.query("COMMIT");
 
-    // Publish event
+    // 🐇 Publish event with correlationId
     try {
       const channel = getChannel();
       await channel.assertQueue("transaction_events");
-      channel.sendToQueue(
-        "transaction_events",
-        Buffer.from(
-          JSON.stringify({
-            type: "TRANSFER_COMPLETED",
-            sender: senderTxn.rows[0],
-            receiver: receiverTxn.rows[0],
-          })
-        )
-      );
-      console.log("📤 Sent TRANSFER_COMPLETED event to RabbitMQ");
+      const event = {
+        type: "TRANSFER_COMPLETED",
+        sender: senderTxn.rows[0],
+        receiver: receiverTxn.rows[0],
+        correlationId,
+        source: "transaction-service",
+      };
+      channel.sendToQueue("transaction_events", Buffer.from(JSON.stringify(event)), {
+        persistent: true,
+      });
+      logger.info({ correlationId }, "📤 Sent TRANSFER_COMPLETED event");
     } catch (mqErr) {
-      console.error("RabbitMQ publish error:", mqErr.message);
+      logger.error({ correlationId, error: mqErr.message }, "RabbitMQ publish failed");
     }
 
     res.status(201).json({
@@ -1073,15 +1322,14 @@ app.post("/transactions/transfer", async (req, res) => {
     });
   } catch (err) {
     await client.query("ROLLBACK");
+    logger.error({ correlationId, error: err.message }, "Transfer error");
     res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
   }
 });
 
-/* --------------------- Transactions Route --------------------- */
-app.use("/transactions", transactionRoutes);
-
 /* --------------------- Start Server --------------------- */
 const port = process.env.PORT || 8082;
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+app.listen(port, () => logger.info(`🚀 Server running on port ${port}`));
+
