@@ -1089,17 +1089,296 @@
 // /* --------------------- Start Server --------------------- */
 // const port = process.env.PORT || 8082;
 // app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+// import express from "express";
+// import swaggerUi from "swagger-ui-express";
+// import YAML from "yamljs";
+
+
+// // existing routes here...
+
+// import dotenv from "dotenv";
+// import promClient from "prom-client";
+// import path from "path";
+// import { fileURLToPath } from "url";
+// import { pool } from "./db.js";
+// import transactionRoutes from "./routes/transactionRoutes.js";
+// import { connectQueue, getChannel } from "./messageQueue.js";
+// import { fetchAccountBalanceCB, debitAccount, creditAccount } from "./accountClient.js";
+// import logger from "./logger.js";
+// import { correlationIdMiddleware } from "./middleware/correlationId.js";
+
+// dotenv.config();
+
+// // Setup path resolution for ES modules
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
+
+// const app = express();
+
+// // 🧠 Load and serve Swagger OpenAPI
+// const swaggerDocument = YAML.load(path.join(__dirname, "../openapi.yaml"));
+// app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+// app.use(express.json());
+// app.use(correlationIdMiddleware); // 🧩 Add correlation ID early
+
+// /* --------------------- Connect to RabbitMQ --------------------- */
+// connectQueue()
+//   .then(() => logger.info("✅ RabbitMQ connected"))
+//   .catch((err) => logger.error("❌ RabbitMQ connection error:", err));
+
+// /* --------------------- Prometheus Metrics --------------------- */
+
+
+// const register = new promClient.Registry();
+
+// // Collect default metrics (CPU, memory, etc.)
+// promClient.collectDefaultMetrics({ register });
+
+// // Custom HTTP request counter
+// const httpRequestCounter = new promClient.Counter({
+//   name: "http_requests_total",
+//   help: "Total number of HTTP requests",
+//   labelNames: ["method", "route", "status_code"],
+// });
+// register.registerMetric(httpRequestCounter);
+
+// // Middleware to increment counter
+// app.use((req, res, next) => {
+//   res.on("finish", () => {
+//     httpRequestCounter.labels(req.method, req.path, res.statusCode).inc();
+//   });
+//   next();
+// });
+
+// // ✅ Expose /metrics endpoint
+// app.get("/metrics", async (req, res) => {
+//   try {
+//     res.set("Content-Type", register.contentType);
+//     res.end(await register.metrics());
+//   } catch (err) {
+//     res.status(500).end(err);
+//   }
+// });
+
+
+// /* --------------------- Health --------------------- */
+// app.get("/health", (req, res) => {
+//   logger.info({ correlationId: req.correlationId }, "Health check OK");
+//   res.json({ status: "Transaction Service running" });
+// });
+
+// /* --------------------- transaction routes check --------------------- */
+// app.use("/transactions", transactionRoutes);
+
+// /* --------------------- DB Check --------------------- */
+// app.get("/db-check", async (req, res) => {
+//   try {
+//     const result = await pool.query("SELECT NOW() AS current_time");
+//     logger.info({ correlationId: req.correlationId }, "DB connectivity OK");
+//     res.json({ success: true, db_time: result.rows[0].current_time });
+//   } catch (err) {
+//     logger.error({ correlationId: req.correlationId, error: err.message }, "DB check failed");
+//     res.status(500).json({ success: false, message: err.message });
+//   }
+// });
+
+// /* --------------------- Deposit API --------------------- */
+// app.post("/transactions/deposit", async (req, res) => {
+//   const { account_id, amount } = req.body;
+//   const idempotencyKey = req.headers["idempotency-key"];
+
+//   if (!account_id || !amount)
+//     return res.status(400).json({ success: false, message: "account_id and amount are required" });
+//   if (!idempotencyKey)
+//     return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
+
+//   try {
+//     const existingKey = await pool.query(
+//       "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
+//       [idempotencyKey]
+//     );
+
+//     if (existingKey.rows.length > 0) {
+//       const existingTxn = await pool.query(
+//         "SELECT * FROM transactions WHERE txn_id = $1",
+//         [existingKey.rows[0].txn_id]
+//       );
+//       logger.info({ correlationId: req.correlationId }, "Reused existing deposit transaction");
+//       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
+//     }
+
+//     const ref = `REF-${Date.now()}`;
+//     const counterparty = "SYSTEM:Deposit";
+
+//     const insertTxn = await pool.query(
+//       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+//        VALUES ($1, $2, 'DEPOSIT', $3, $4)
+//        RETURNING *;`,
+//       [account_id, amount, counterparty, ref]
+//     );
+//     const txn = insertTxn.rows[0];
+
+//     await pool.query(
+//       `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
+//       [idempotencyKey, txn.txn_id]
+//     );
+
+//     // 🐇 Publish event with correlationId
+//     try {
+//       const channel = getChannel();
+//       await channel.assertQueue("transaction_events");
+//       const event = {
+//         type: "DEPOSIT_CREATED",
+//         transaction: txn,
+//         correlationId: req.correlationId,
+//         source: "transaction-service",
+//       };
+//       channel.sendToQueue("transaction_events", Buffer.from(JSON.stringify(event)), {
+//         persistent: true,
+//       });
+//       logger.info({ correlationId: req.correlationId }, "📤 Sent DEPOSIT_CREATED event");
+//     } catch (mqErr) {
+//       logger.error({ correlationId: req.correlationId, error: mqErr.message }, "RabbitMQ publish failed");
+//     }
+
+//     res.status(201).json({ success: true, transaction: txn });
+//   } catch (err) {
+//     logger.error({ correlationId: req.correlationId, error: err.message }, "Deposit error");
+//     res.status(500).json({ success: false, message: err.message });
+//   }
+// });
+
+// /* --------------------- Transfer API --------------------- */
+// app.post("/transactions/transfer", async (req, res) => {
+//   const { from_account_id, to_account_id, amount } = req.body;
+//   const idempotencyKey = req.headers["idempotency-key"];
+//   const correlationId = req.correlationId;
+
+//   if (!from_account_id || !to_account_id || !amount)
+//     return res.status(400).json({
+//       success: false,
+//       message: "from_account_id, to_account_id, and amount are required",
+//     });
+//   if (!idempotencyKey)
+//     return res.status(400).json({ success: false, message: "Missing Idempotency-Key header" });
+
+//   const client = await pool.connect();
+//   try {
+//     const existingKey = await client.query(
+//       "SELECT txn_id FROM idempotency_keys WHERE idempotency_key = $1",
+//       [idempotencyKey]
+//     );
+//     if (existingKey.rows.length > 0) {
+//       const existingTxn = await client.query(
+//         "SELECT * FROM transactions WHERE txn_id = $1",
+//         [existingKey.rows[0].txn_id]
+//       );
+//       logger.info({ correlationId }, "Reused existing transfer transaction");
+//       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
+//     }
+
+//     logger.info({ correlationId }, "🔍 Validating source account via circuit breaker...");
+//     const fromAcc = await fetchAccountBalanceCB.fire(from_account_id);
+//     if (!fromAcc.success)
+//       return res.status(503).json({ success: false, message: fromAcc.message });
+
+//     if (fromAcc.status !== "ACTIVE")
+//       return res.status(403).json({ success: false, message: "Account frozen or inactive" });
+
+//     if (fromAcc.balance < amount)
+//       return res.status(400).json({ success: false, message: "Insufficient balance" });
+
+//     const DAILY_LIMIT = 200000;
+//     const { rows: dailyRows } = await client.query(
+//       `SELECT COALESCE(SUM(amount), 0) AS total_today
+//        FROM transactions
+//        WHERE account_id = $1
+//          AND txn_type = 'TRANSFER_OUT'
+//          AND DATE(created_at) = CURRENT_DATE`,
+//       [from_account_id]
+//     );
+//     const totalToday = parseFloat(dailyRows[0].total_today || 0);
+//     if (totalToday + Number(amount) > DAILY_LIMIT)
+//       return res.status(400).json({
+//         success: false,
+//         message: `Daily transfer limit exceeded (₹${DAILY_LIMIT})`,
+//       });
+
+//     await debitAccount(from_account_id, amount);
+//     await creditAccount(to_account_id, amount);
+
+//     await client.query("BEGIN");
+
+//     const outRef = `REF-OUT-${Date.now()}`;
+//     const senderTxn = await client.query(
+//       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+//        VALUES ($1, $2, 'TRANSFER_OUT', $3, $4)
+//        RETURNING *;`,
+//       [from_account_id, amount, `TO:${to_account_id}`, outRef]
+//     );
+
+//     const inRef = `REF-IN-${Date.now()}`;
+//     const receiverTxn = await client.query(
+//       `INSERT INTO transactions (account_id, amount, txn_type, counterparty, reference)
+//        VALUES ($1, $2, 'TRANSFER_IN', $3, $4)
+//        RETURNING *;`,
+//       [to_account_id, amount, `FROM:${from_account_id}`, inRef]
+//     );
+
+//     await client.query(
+//       `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
+//       [idempotencyKey, senderTxn.rows[0].txn_id]
+//     );
+//     await client.query("COMMIT");
+
+//     // 🐇 Publish event with correlationId
+//     try {
+//       const channel = getChannel();
+//       await channel.assertQueue("transaction_events");
+//       const event = {
+//         type: "TRANSFER_COMPLETED",
+//         sender: senderTxn.rows[0],
+//         receiver: receiverTxn.rows[0],
+//         correlationId,
+//         source: "transaction-service",
+//       };
+//       channel.sendToQueue("transaction_events", Buffer.from(JSON.stringify(event)), {
+//         persistent: true,
+//       });
+//       logger.info({ correlationId }, "📤 Sent TRANSFER_COMPLETED event");
+//     } catch (mqErr) {
+//       logger.error({ correlationId, error: mqErr.message }, "RabbitMQ publish failed");
+//     }
+
+//     res.status(201).json({
+//       success: true,
+//       sender_transaction: senderTxn.rows[0],
+//       receiver_transaction: receiverTxn.rows[0],
+//     });
+//   } catch (err) {
+//     await client.query("ROLLBACK");
+//     logger.error({ correlationId, error: err.message }, "Transfer error");
+//     res.status(500).json({ success: false, message: err.message });
+//   } finally {
+//     client.release();
+//   }
+// });
+
+// /* --------------------- Start Server --------------------- */
+// const port = process.env.PORT || 8082;
+// app.listen(port, () => logger.info(`🚀 Server running on port ${port}`));
+
 import express from "express";
 import swaggerUi from "swagger-ui-express";
 import YAML from "yamljs";
-
-
-// existing routes here...
-
 import dotenv from "dotenv";
-import promClient from "prom-client";
 import path from "path";
 import { fileURLToPath } from "url";
+import promClient from "prom-client";
+import { performance } from "perf_hooks";
+import crypto from "crypto";
+
 import { pool } from "./db.js";
 import transactionRoutes from "./routes/transactionRoutes.js";
 import { connectQueue, getChannel } from "./messageQueue.js";
@@ -1107,51 +1386,82 @@ import { fetchAccountBalanceCB, debitAccount, creditAccount } from "./accountCli
 import logger from "./logger.js";
 import { correlationIdMiddleware } from "./middleware/correlationId.js";
 
+/* --------------------- Setup --------------------- */
 dotenv.config();
-
-// Setup path resolution for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const app = express();
+app.use(express.json());
+app.use(correlationIdMiddleware);
 
-// 🧠 Load and serve Swagger OpenAPI
+/* --------------------- Swagger --------------------- */
 const swaggerDocument = YAML.load(path.join(__dirname, "../openapi.yaml"));
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
-app.use(express.json());
-app.use(correlationIdMiddleware); // 🧩 Add correlation ID early
-
-/* --------------------- Connect to RabbitMQ --------------------- */
+/* --------------------- RabbitMQ --------------------- */
 connectQueue()
   .then(() => logger.info("✅ RabbitMQ connected"))
   .catch((err) => logger.error("❌ RabbitMQ connection error:", err));
 
 /* --------------------- Prometheus Metrics --------------------- */
-
-
 const register = new promClient.Registry();
-
-// Collect default metrics (CPU, memory, etc.)
 promClient.collectDefaultMetrics({ register });
 
-// Custom HTTP request counter
+// RED / USE metrics
 const httpRequestCounter = new promClient.Counter({
   name: "http_requests_total",
   help: "Total number of HTTP requests",
   labelNames: ["method", "route", "status_code"],
 });
-register.registerMetric(httpRequestCounter);
+const httpRequestErrors = new promClient.Counter({
+  name: "http_request_errors_total",
+  help: "Total number of failed HTTP requests",
+  labelNames: ["method", "route"],
+});
+const httpRequestDuration = new promClient.Histogram({
+  name: "http_request_duration_seconds",
+  help: "HTTP request duration in seconds",
+  labelNames: ["method", "route", "status_code"],
+  buckets: [0.05, 0.1, 0.2, 0.5, 1, 2, 5],
+});
 
-// Middleware to increment counter
+// Business metrics
+const transactionsTotal = new promClient.Counter({
+  name: "transactions_total",
+  help: "Total number of transactions processed",
+  labelNames: ["txn_type"],
+});
+const failedTransfersTotal = new promClient.Counter({
+  name: "failed_transfers_total",
+  help: "Total number of failed transfer attempts",
+});
+const balanceCheckLatency = new promClient.Histogram({
+  name: "balance_check_latency_ms",
+  help: "Latency of balance-check operations (ms)",
+  buckets: [5, 10, 20, 50, 100, 200, 500],
+});
+
+// register metrics
+register.registerMetric(httpRequestCounter);
+register.registerMetric(httpRequestErrors);
+register.registerMetric(httpRequestDuration);
+register.registerMetric(transactionsTotal);
+register.registerMetric(failedTransfersTotal);
+register.registerMetric(balanceCheckLatency);
+
+/* Middleware: track RED metrics */
 app.use((req, res, next) => {
+  const start = performance.now();
   res.on("finish", () => {
+    const dur = (performance.now() - start) / 1000;
     httpRequestCounter.labels(req.method, req.path, res.statusCode).inc();
+    httpRequestDuration.labels(req.method, req.path, res.statusCode).observe(dur);
+    if (res.statusCode >= 400) httpRequestErrors.labels(req.method, req.path).inc();
   });
   next();
 });
 
-// ✅ Expose /metrics endpoint
+/* /metrics endpoint */
 app.get("/metrics", async (req, res) => {
   try {
     res.set("Content-Type", register.contentType);
@@ -1161,15 +1471,35 @@ app.get("/metrics", async (req, res) => {
   }
 });
 
+/* --------------------- Structured Logging --------------------- */
+app.use((req, res, next) => {
+  const start = performance.now();
+  const correlationId = req.headers["x-correlation-id"] || crypto.randomUUID();
+  res.setHeader("x-correlation-id", correlationId);
+  req.correlationId = correlationId;
+
+  res.on("finish", () => {
+    const latency = performance.now() - start;
+    const safeBody = JSON.stringify(req.body || {})
+      .replace(/"email":"[^"]+"/g, '"email":"***"')
+      .replace(/"phone":"[^"]+"/g, '"phone":"***"');
+    logger.info({
+      correlationId,
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      latency_ms: latency.toFixed(2),
+      body: safeBody,
+    });
+  });
+  next();
+});
 
 /* --------------------- Health --------------------- */
 app.get("/health", (req, res) => {
   logger.info({ correlationId: req.correlationId }, "Health check OK");
   res.json({ status: "Transaction Service running" });
 });
-
-/* --------------------- transaction routes check --------------------- */
-app.use("/transactions", transactionRoutes);
 
 /* --------------------- DB Check --------------------- */
 app.get("/db-check", async (req, res) => {
@@ -1187,6 +1517,7 @@ app.get("/db-check", async (req, res) => {
 app.post("/transactions/deposit", async (req, res) => {
   const { account_id, amount } = req.body;
   const idempotencyKey = req.headers["idempotency-key"];
+  const correlationId = req.correlationId;
 
   if (!account_id || !amount)
     return res.status(400).json({ success: false, message: "account_id and amount are required" });
@@ -1204,7 +1535,7 @@ app.post("/transactions/deposit", async (req, res) => {
         "SELECT * FROM transactions WHERE txn_id = $1",
         [existingKey.rows[0].txn_id]
       );
-      logger.info({ correlationId: req.correlationId }, "Reused existing deposit transaction");
+      logger.info({ correlationId }, "Reused existing deposit transaction");
       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
     }
 
@@ -1218,33 +1549,34 @@ app.post("/transactions/deposit", async (req, res) => {
       [account_id, amount, counterparty, ref]
     );
     const txn = insertTxn.rows[0];
+    transactionsTotal.labels("deposit").inc(); // ✅ Business metric
 
     await pool.query(
       `INSERT INTO idempotency_keys (idempotency_key, txn_id) VALUES ($1, $2);`,
       [idempotencyKey, txn.txn_id]
     );
 
-    // 🐇 Publish event with correlationId
+    // Publish event
     try {
       const channel = getChannel();
       await channel.assertQueue("transaction_events");
       const event = {
         type: "DEPOSIT_CREATED",
         transaction: txn,
-        correlationId: req.correlationId,
+        correlationId,
         source: "transaction-service",
       };
       channel.sendToQueue("transaction_events", Buffer.from(JSON.stringify(event)), {
         persistent: true,
       });
-      logger.info({ correlationId: req.correlationId }, "📤 Sent DEPOSIT_CREATED event");
+      logger.info({ correlationId }, "📤 Sent DEPOSIT_CREATED event");
     } catch (mqErr) {
-      logger.error({ correlationId: req.correlationId, error: mqErr.message }, "RabbitMQ publish failed");
+      logger.error({ correlationId, error: mqErr.message }, "RabbitMQ publish failed");
     }
 
     res.status(201).json({ success: true, transaction: txn });
   } catch (err) {
-    logger.error({ correlationId: req.correlationId, error: err.message }, "Deposit error");
+    logger.error({ correlationId, error: err.message }, "Deposit error");
     res.status(500).json({ success: false, message: err.message });
   }
 });
@@ -1278,14 +1610,14 @@ app.post("/transactions/transfer", async (req, res) => {
       return res.json({ success: true, transaction: existingTxn.rows[0], reused: true });
     }
 
-    logger.info({ correlationId }, "🔍 Validating source account via circuit breaker...");
+    const startCheck = performance.now();
     const fromAcc = await fetchAccountBalanceCB.fire(from_account_id);
+    balanceCheckLatency.observe(performance.now() - startCheck);
+
     if (!fromAcc.success)
       return res.status(503).json({ success: false, message: fromAcc.message });
-
     if (fromAcc.status !== "ACTIVE")
       return res.status(403).json({ success: false, message: "Account frozen or inactive" });
-
     if (fromAcc.balance < amount)
       return res.status(400).json({ success: false, message: "Insufficient balance" });
 
@@ -1332,7 +1664,9 @@ app.post("/transactions/transfer", async (req, res) => {
     );
     await client.query("COMMIT");
 
-    // 🐇 Publish event with correlationId
+    transactionsTotal.labels("transfer").inc(); // ✅ Business metric
+
+    // Publish event
     try {
       const channel = getChannel();
       await channel.assertQueue("transaction_events");
@@ -1358,6 +1692,7 @@ app.post("/transactions/transfer", async (req, res) => {
     });
   } catch (err) {
     await client.query("ROLLBACK");
+    failedTransfersTotal.inc(); // ✅ Business metric
     logger.error({ correlationId, error: err.message }, "Transfer error");
     res.status(500).json({ success: false, message: err.message });
   } finally {
@@ -1365,7 +1700,11 @@ app.post("/transactions/transfer", async (req, res) => {
   }
 });
 
+/* --------------------- Transaction Routes --------------------- */
+app.use("/transactions", transactionRoutes);
+
 /* --------------------- Start Server --------------------- */
 const port = process.env.PORT || 8082;
-app.listen(port, () => logger.info(`🚀 Server running on port ${port}`));
+app.listen(port, () => logger.info(`🚀 Transaction Service running on port ${port}`));
 
+export { register, transactionsTotal, failedTransfersTotal, balanceCheckLatency };

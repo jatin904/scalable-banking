@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  # -----------------------------------------------------------
+  # Prometheus — scrapes /metrics from transaction-service
+  # -----------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    networks:
+      - scalable_net
+
+  # -----------------------------------------------------------
+  # Grafana — visualize Prometheus metrics
+  # -----------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - scalable_net
+
+networks:
+  scalable_net:
+    external: true  # We'll attach to your main compose network
+
+volumes:
+  grafana-data:
