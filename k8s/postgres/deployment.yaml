@@ -1,0 +1,97 @@
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: transaction-db
+#   namespace: banking
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: transaction-db
+#   template:
+#     metadata:
+#       labels:
+#         app: transaction-db
+#     spec:
+#       containers:
+#         - name: transaction-db
+#           image: postgres:16
+#           env:
+#             - name: POSTGRES_USER
+#               value: "txn_user"
+#             - name: POSTGRES_PASSWORD
+#               value: "txn_pass"
+#             - name: POSTGRES_DB
+#               value: "transaction_db"
+#           ports:
+#             - containerPort: 5432
+#           volumeMounts:
+#             - name: txn-data
+#               mountPath: /var/lib/postgresql/data
+#       volumes:
+#         - name: txn-data
+#           emptyDir: {}
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: transaction-db
+#   namespace: banking
+# spec:
+#   selector:
+#     app: transaction-db
+#   ports:
+#     - port: 5432
+#       targetPort: 5432
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transaction-db
+  namespace: banking
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transaction-db
+  template:
+    metadata:
+      labels:
+        app: transaction-db
+    spec:
+      containers:
+        - name: transaction-db
+          image: postgres:16
+          env:
+            - name: POSTGRES_USER
+              value: "txn_user"
+            - name: POSTGRES_PASSWORD
+              value: "txn_pass"
+            - name: POSTGRES_DB
+              value: "transaction_db"
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: txn-data
+              mountPath: /var/lib/postgresql/data
+            # 🟢 Mount init files from ConfigMap
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: txn-data
+          emptyDir: {}
+        - name: init-sql
+          configMap:
+            name: transaction-init-sql
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: transaction-db
+  namespace: banking
+spec:
+  selector:
+    app: transaction-db
+  ports:
+    - port: 5432
+      targetPort: 5432

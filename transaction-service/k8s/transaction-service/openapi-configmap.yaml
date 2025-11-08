@@ -1,0 +1,149 @@
+﻿apiVersion: v1
+data:
+  openapi.yaml: "# openapi: 3.0.0\r\n# info:\r\n#   title: Transaction Service API\r\n#
+    \  version: 1.0.0\r\n#   description: |\r\n#     REST API for the Transaction
+    Service in the Scalable Banking system.\r\n#     Handles money transfers, deposits,
+    and exposes Prometheus metrics.\r\n# servers:\r\n#   - url: http://localhost:8082\r\n#
+    \    description: Local development\r\n\r\n# paths:\r\n#   /transactions/transfer:\r\n#
+    \    post:\r\n#       summary: Create a transfer (idempotent)\r\n#       operationId:
+    createTransfer\r\n#       parameters:\r\n#         - in: header\r\n#           name:
+    Idempotency-Key\r\n#           required: true\r\n#           schema:\r\n#             type:
+    string\r\n#           description: Unique key to ensure idempotent request handling.\r\n#
+    \        - in: header\r\n#           name: X-Correlation-ID\r\n#           required:
+    false\r\n#           schema:\r\n#             type: string\r\n#           description:
+    Correlation ID for traceability.\r\n#       requestBody:\r\n#         required:
+    true\r\n#         content:\r\n#           application/json:\r\n#             schema:\r\n#
+    \              type: object\r\n#               required: [from_account_id, to_account_id,
+    amount]\r\n#               properties:\r\n#                 from_account_id:\r\n#
+    \                  type: integer\r\n#                   example: 101\r\n#                 to_account_id:\r\n#
+    \                  type: integer\r\n#                   example: 202\r\n#                 amount:\r\n#
+    \                  type: number\r\n#                   format: float\r\n#                   example:
+    250.50\r\n#       responses:\r\n#         '201':\r\n#           description: Transfer
+    created successfully\r\n#           content:\r\n#             application/json:\r\n#
+    \              schema:\r\n#                 $ref: '#/components/schemas/Transaction'\r\n#
+    \        '400':\r\n#           description: Bad request or business rule violation\r\n#
+    \        '409':\r\n#           description: Duplicate request (idempotency conflict)\r\n\r\n#
+    \  /transactions/deposit:\r\n#     post:\r\n#       summary: Deposit into an account\r\n#
+    \      operationId: depositFunds\r\n#       requestBody:\r\n#         required:
+    true\r\n#         content:\r\n#           application/json:\r\n#             schema:\r\n#
+    \              type: object\r\n#               required: [account_id, amount]\r\n#
+    \              properties:\r\n#                 account_id:\r\n#                   type:
+    integer\r\n#                   example: 101\r\n#                 amount:\r\n#
+    \                  type: number\r\n#                   example: 500.0\r\n#       responses:\r\n#
+    \        '201':\r\n#           description: Deposit created\r\n#           content:\r\n#
+    \            application/json:\r\n#               schema:\r\n#                 $ref:
+    '#/components/schemas/Transaction'\r\n#         '400':\r\n#           description:
+    Invalid account or amount\r\n\r\n#   /transactions/{id}:\r\n#     get:\r\n#       summary:
+    Fetch a transaction by ID\r\n#       operationId: getTransaction\r\n#       parameters:\r\n#
+    \        - name: id\r\n#           in: path\r\n#           required: true\r\n#
+    \          schema:\r\n#             type: string\r\n#             example: \"7e0dab25-ab32-42de-bcbd-19f3d431b812\"\r\n#
+    \      responses:\r\n#         '200':\r\n#           description: Transaction
+    found\r\n#           content:\r\n#             application/json:\r\n#               schema:\r\n#
+    \                $ref: '#/components/schemas/Transaction'\r\n#         '404':\r\n#
+    \          description: Transaction not found\r\n\r\n#   /metrics:\r\n#     get:\r\n#
+    \      summary: Expose Prometheus metrics\r\n#       operationId: getMetrics\r\n#
+    \      responses:\r\n#         '200':\r\n#           description: Prometheus metrics
+    endpoint\r\n#           content:\r\n#             text/plain:\r\n#               schema:\r\n#
+    \                type: string\r\n#                 example: |\r\n#                   #
+    HELP http_requests_total The total number of HTTP requests.\r\n#                   #
+    TYPE http_requests_total counter\r\n#                   http_requests_total{method=\"get\",path=\"/metrics\"}
+    10\r\n\r\n# components:\r\n#   schemas:\r\n#     Transaction:\r\n#       type:
+    object\r\n#       properties:\r\n#         id:\r\n#           type: string\r\n#
+    \          example: \"7e0dab25-ab32-42de-bcbd-19f3d431b812\"\r\n#         type:\r\n#
+    \          type: string\r\n#           enum: [transfer, deposit]\r\n#         from_account_id:\r\n#
+    \          type: integer\r\n#           nullable: true\r\n#           example:
+    101\r\n#         to_account_id:\r\n#           type: integer\r\n#           nullable:
+    true\r\n#           example: 202\r\n#         amount:\r\n#           type: number\r\n#
+    \          example: 250.50\r\n#         status:\r\n#           type: string\r\n#
+    \          enum: [pending, completed, failed]\r\n#           example: completed\r\n#
+    \        created_at:\r\n#           type: string\r\n#           format: date-time\r\n#
+    \          example: \"2025-11-06T10:00:00Z\"\r\n\r\nopenapi: 3.0.0\r\ninfo:\r\n
+    \ title: Transaction Service API\r\n  version: 1.0.0\r\n  description: |\r\n    REST
+    API for the Transaction Service in the Scalable Banking system.\r\n    Handles
+    money transfers, deposits, queries, and exposes Prometheus metrics.\r\nservers:\r\n
+    \ - url: http://localhost:8082\r\n    description: Local development\r\n\r\npaths:\r\n
+    \ /transactions:\r\n    get:\r\n      summary: List all transactions or filter
+    by account_id\r\n      operationId: listTransactions\r\n      parameters:\r\n
+    \       - in: query\r\n          name: account_id\r\n          schema:\r\n            type:
+    integer\r\n          required: false\r\n          description: Filter transactions
+    by account ID\r\n      responses:\r\n        '200':\r\n          description:
+    List of transactions\r\n          content:\r\n            application/json:\r\n
+    \             schema:\r\n                type: object\r\n                properties:\r\n
+    \                 success:\r\n                    type: boolean\r\n                    example:
+    true\r\n                  count:\r\n                    type: integer\r\n                    example:
+    2\r\n                  transactions:\r\n                    type: array\r\n                    items:\r\n
+    \                     $ref: '#/components/schemas/Transaction'\r\n        '500':\r\n
+    \         description: Server error\r\n\r\n  /transactions/account/{accountId}:\r\n
+    \   get:\r\n      summary: Get transactions for a specific account\r\n      operationId:
+    getTransactionsByAccountId\r\n      parameters:\r\n        - name: accountId\r\n
+    \         in: path\r\n          required: true\r\n          schema:\r\n            type:
+    integer\r\n            example: 101\r\n          description: Account ID to fetch
+    transactions for\r\n      responses:\r\n        '200':\r\n          description:
+    Transactions found for the account\r\n          content:\r\n            application/json:\r\n
+    \             schema:\r\n                type: object\r\n                properties:\r\n
+    \                 success:\r\n                    type: boolean\r\n                    example:
+    true\r\n                  count:\r\n                    type: integer\r\n                    example:
+    2\r\n                  data:\r\n                    type: array\r\n                    items:\r\n
+    \                     $ref: '#/components/schemas/Transaction'\r\n        '404':\r\n
+    \         description: No transactions found for the given account\r\n        '500':\r\n
+    \         description: Server error\r\n\r\n  /transactions/{id}:\r\n    get:\r\n
+    \     summary: Fetch a transaction by transaction ID\r\n      operationId: getTransactionById\r\n
+    \     parameters:\r\n        - name: id\r\n          in: path\r\n          required:
+    true\r\n          schema:\r\n            type: string\r\n            example:
+    \"7e0dab25-ab32-42de-bcbd-19f3d431b812\"\r\n      responses:\r\n        '200':\r\n
+    \         description: Transaction found\r\n          content:\r\n            application/json:\r\n
+    \             schema:\r\n                type: object\r\n                properties:\r\n
+    \                 success:\r\n                    type: boolean\r\n                    example:
+    true\r\n                  transaction:\r\n                    $ref: '#/components/schemas/Transaction'\r\n
+    \       '404':\r\n          description: Transaction not found\r\n        '500':\r\n
+    \         description: Server error\r\n\r\n  /transactions/transfer:\r\n    post:\r\n
+    \     summary: Create a transfer (idempotent)\r\n      operationId: createTransfer\r\n
+    \     parameters:\r\n        - in: header\r\n          name: Idempotency-Key\r\n
+    \         required: true\r\n          schema:\r\n            type: string\r\n
+    \         description: Unique key to ensure idempotent request handling.\r\n        -
+    in: header\r\n          name: X-Correlation-ID\r\n          required: false\r\n
+    \         schema:\r\n            type: string\r\n          description: Correlation
+    ID for traceability.\r\n      requestBody:\r\n        required: true\r\n        content:\r\n
+    \         application/json:\r\n            schema:\r\n              type: object\r\n
+    \             required: [from_account_id, to_account_id, amount]\r\n              properties:\r\n
+    \               from_account_id:\r\n                  type: integer\r\n                  example:
+    101\r\n                to_account_id:\r\n                  type: integer\r\n                  example:
+    202\r\n                amount:\r\n                  type: number\r\n                  format:
+    float\r\n                  example: 250.50\r\n      responses:\r\n        '201':\r\n
+    \         description: Transfer created successfully\r\n          content:\r\n
+    \           application/json:\r\n              schema:\r\n                $ref:
+    '#/components/schemas/Transaction'\r\n        '400':\r\n          description:
+    Bad request or business rule violation\r\n        '409':\r\n          description:
+    Duplicate request (idempotency conflict)\r\n        '500':\r\n          description:
+    Server error\r\n\r\n  /transactions/deposit:\r\n    post:\r\n      summary: Deposit
+    into an account\r\n      operationId: depositFunds\r\n      requestBody:\r\n        required:
+    true\r\n        content:\r\n          application/json:\r\n            schema:\r\n
+    \             type: object\r\n              required: [account_id, amount]\r\n
+    \             properties:\r\n                account_id:\r\n                  type:
+    integer\r\n                  example: 101\r\n                amount:\r\n                  type:
+    number\r\n                  example: 500.0\r\n      responses:\r\n        '201':\r\n
+    \         description: Deposit created successfully\r\n          content:\r\n
+    \           application/json:\r\n              schema:\r\n                $ref:
+    '#/components/schemas/Transaction'\r\n        '400':\r\n          description:
+    Invalid account or amount\r\n        '500':\r\n          description: Server error\r\n\r\n
+    \ /metrics:\r\n    get:\r\n      summary: Expose Prometheus metrics\r\n      operationId:
+    getMetrics\r\n      responses:\r\n        '200':\r\n          description: Prometheus
+    metrics endpoint\r\n          content:\r\n            text/plain:\r\n              schema:\r\n
+    \               type: string\r\n                example: |\r\n                  #
+    HELP http_requests_total The total number of HTTP requests.\r\n                  #
+    TYPE http_requests_total counter\r\n                  http_requests_total{method=\"get\",path=\"/metrics\"}
+    10\r\n\r\ncomponents:\r\n  schemas:\r\n    Transaction:\r\n      type: object\r\n
+    \     properties:\r\n        id:\r\n          type: string\r\n          example:
+    \"7e0dab25-ab32-42de-bcbd-19f3d431b812\"\r\n        type:\r\n          type: string\r\n
+    \         enum: [transfer, deposit]\r\n        from_account_id:\r\n          type:
+    integer\r\n          nullable: true\r\n          example: 101\r\n        to_account_id:\r\n
+    \         type: integer\r\n          nullable: true\r\n          example: 202\r\n
+    \       amount:\r\n          type: number\r\n          example: 250.50\r\n        status:\r\n
+    \         type: string\r\n          enum: [pending, completed, failed]\r\n          example:
+    completed\r\n        created_at:\r\n          type: string\r\n          format:
+    date-time\r\n          example: \"2025-11-06T10:00:00Z\"\r\n"
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: transaction-openapi
+  namespace: banking

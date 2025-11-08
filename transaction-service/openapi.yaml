@@ -1,0 +1,642 @@
+# openapi: 3.0.0
+# info:
+#   title: Transaction Service API
+#   version: 1.0.0
+#   description: |
+#     REST API for the Transaction Service in the Scalable Banking system.
+#     Handles money transfers, deposits, and exposes Prometheus metrics.
+# servers:
+#   - url: http://localhost:8082
+#     description: Local development
+
+# paths:
+#   /transactions/transfer:
+#     post:
+#       summary: Create a transfer (idempotent)
+#       operationId: createTransfer
+#       parameters:
+#         - in: header
+#           name: Idempotency-Key
+#           required: true
+#           schema:
+#             type: string
+#           description: Unique key to ensure idempotent request handling.
+#         - in: header
+#           name: X-Correlation-ID
+#           required: false
+#           schema:
+#             type: string
+#           description: Correlation ID for traceability.
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               type: object
+#               required: [from_account_id, to_account_id, amount]
+#               properties:
+#                 from_account_id:
+#                   type: integer
+#                   example: 101
+#                 to_account_id:
+#                   type: integer
+#                   example: 202
+#                 amount:
+#                   type: number
+#                   format: float
+#                   example: 250.50
+#       responses:
+#         '201':
+#           description: Transfer created successfully
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: '#/components/schemas/Transaction'
+#         '400':
+#           description: Bad request or business rule violation
+#         '409':
+#           description: Duplicate request (idempotency conflict)
+
+#   /transactions/deposit:
+#     post:
+#       summary: Deposit into an account
+#       operationId: depositFunds
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               type: object
+#               required: [account_id, amount]
+#               properties:
+#                 account_id:
+#                   type: integer
+#                   example: 101
+#                 amount:
+#                   type: number
+#                   example: 500.0
+#       responses:
+#         '201':
+#           description: Deposit created
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: '#/components/schemas/Transaction'
+#         '400':
+#           description: Invalid account or amount
+
+#   /transactions/{id}:
+#     get:
+#       summary: Fetch a transaction by ID
+#       operationId: getTransaction
+#       parameters:
+#         - name: id
+#           in: path
+#           required: true
+#           schema:
+#             type: string
+#             example: "7e0dab25-ab32-42de-bcbd-19f3d431b812"
+#       responses:
+#         '200':
+#           description: Transaction found
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: '#/components/schemas/Transaction'
+#         '404':
+#           description: Transaction not found
+
+#   /metrics:
+#     get:
+#       summary: Expose Prometheus metrics
+#       operationId: getMetrics
+#       responses:
+#         '200':
+#           description: Prometheus metrics endpoint
+#           content:
+#             text/plain:
+#               schema:
+#                 type: string
+#                 example: |
+#                   # HELP http_requests_total The total number of HTTP requests.
+#                   # TYPE http_requests_total counter
+#                   http_requests_total{method="get",path="/metrics"} 10
+
+# components:
+#   schemas:
+#     Transaction:
+#       type: object
+#       properties:
+#         id:
+#           type: string
+#           example: "7e0dab25-ab32-42de-bcbd-19f3d431b812"
+#         type:
+#           type: string
+#           enum: [transfer, deposit]
+#         from_account_id:
+#           type: integer
+#           nullable: true
+#           example: 101
+#         to_account_id:
+#           type: integer
+#           nullable: true
+#           example: 202
+#         amount:
+#           type: number
+#           example: 250.50
+#         status:
+#           type: string
+#           enum: [pending, completed, failed]
+#           example: completed
+#         created_at:
+#           type: string
+#           format: date-time
+#           example: "2025-11-06T10:00:00Z"
+
+# openapi: 3.0.0
+# info:
+#   title: Transaction Service API
+#   version: 1.0.0
+#   description: |
+#     REST API for the Transaction Service in the Scalable Banking system.
+#     Handles money transfers, deposits, queries, and exposes Prometheus metrics.
+# servers:
+#   # - url: http://localhost:8082
+#   #   description: Local development
+#     - url: /
+#       description: Minikube NodePort
+
+# paths:
+#   /transactions:
+#     get:
+#       summary: List all transactions or filter by account_id
+#       operationId: listTransactions
+#       parameters:
+#         - in: query
+#           name: account_id
+#           schema:
+#             type: integer
+#           required: false
+#           description: Filter transactions by account ID
+#       responses:
+#         '200':
+#           description: List of transactions
+#           content:
+#             application/json:
+#               schema:
+#                 type: object
+#                 properties:
+#                   success:
+#                     type: boolean
+#                     example: true
+#                   count:
+#                     type: integer
+#                     example: 2
+#                   transactions:
+#                     type: array
+#                     items:
+#                       $ref: '#/components/schemas/Transaction'
+#         '500':
+#           description: Server error
+
+#   /transactions/account/{accountId}:
+#     get:
+#       summary: Get transactions for a specific account
+#       operationId: getTransactionsByAccountId
+#       parameters:
+#         - name: accountId
+#           in: path
+#           required: true
+#           schema:
+#             type: integer
+#             example: 101
+#           description: Account ID to fetch transactions for
+#       responses:
+#         '200':
+#           description: Transactions found for the account
+#           content:
+#             application/json:
+#               schema:
+#                 type: object
+#                 properties:
+#                   success:
+#                     type: boolean
+#                     example: true
+#                   count:
+#                     type: integer
+#                     example: 2
+#                   data:
+#                     type: array
+#                     items:
+#                       $ref: '#/components/schemas/Transaction'
+#         '404':
+#           description: No transactions found for the given account
+#         '500':
+#           description: Server error
+
+#   /transactions/{id}:
+#     get:
+#       summary: Fetch a transaction by transaction ID
+#       operationId: getTransactionById
+#       parameters:
+#         - name: id
+#           in: path
+#           required: true
+#           schema:
+#             type: string
+#             example: "7e0dab25-ab32-42de-bcbd-19f3d431b812"
+#       responses:
+#         '200':
+#           description: Transaction found
+#           content:
+#             application/json:
+#               schema:
+#                 type: object
+#                 properties:
+#                   success:
+#                     type: boolean
+#                     example: true
+#                   transaction:
+#                     $ref: '#/components/schemas/Transaction'
+#         '404':
+#           description: Transaction not found
+#         '500':
+#           description: Server error
+
+#   /transactions/transfer:
+#     post:
+#       summary: Create a transfer (idempotent)
+#       operationId: createTransfer
+#       parameters:
+#         - in: header
+#           name: Idempotency-Key
+#           required: true
+#           schema:
+#             type: string
+#           description: Unique key to ensure idempotent request handling.
+#         - in: header
+#           name: X-Correlation-ID
+#           required: false
+#           schema:
+#             type: string
+#           description: Correlation ID for traceability.
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               type: object
+#               required: [from_account_id, to_account_id, amount]
+#               properties:
+#                 from_account_id:
+#                   type: integer
+#                   example: 101
+#                 to_account_id:
+#                   type: integer
+#                   example: 202
+#                 amount:
+#                   type: number
+#                   format: float
+#                   example: 250.50
+#       responses:
+#         '201':
+#           description: Transfer created successfully
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: '#/components/schemas/Transaction'
+#         '400':
+#           description: Bad request or business rule violation
+#         '409':
+#           description: Duplicate request (idempotency conflict)
+#         '500':
+#           description: Server error
+
+#   /transactions/deposit:
+#     post:
+#       summary: Deposit into an account
+#       operationId: depositFunds
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               type: object
+#               required: [account_id, amount]
+#               properties:
+#                 account_id:
+#                   type: integer
+#                   example: 101
+#                 amount:
+#                   type: number
+#                   example: 500.0
+#       responses:
+#         '201':
+#           description: Deposit created successfully
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: '#/components/schemas/Transaction'
+#         '400':
+#           description: Invalid account or amount
+#         '500':
+#           description: Server error
+
+#   /metrics:
+#     get:
+#       summary: Expose Prometheus metrics
+#       operationId: getMetrics
+#       responses:
+#         '200':
+#           description: Prometheus metrics endpoint
+#           content:
+#             text/plain:
+#               schema:
+#                 type: string
+#                 example: |
+#                   # HELP http_requests_total The total number of HTTP requests.
+#                   # TYPE http_requests_total counter
+#                   http_requests_total{method="get",path="/metrics"} 10
+
+# components:
+#   schemas:
+#     Transaction:
+#       type: object
+#       properties:
+#         id:
+#           type: string
+#           example: "7e0dab25-ab32-42de-bcbd-19f3d431b812"
+#         type:
+#           type: string
+#           enum: [transfer, deposit]
+#         from_account_id:
+#           type: integer
+#           nullable: true
+#           example: 101
+#         to_account_id:
+#           type: integer
+#           nullable: true
+#           example: 202
+#         amount:
+#           type: number
+#           example: 250.50
+#         status:
+#           type: string
+#           enum: [pending, completed, failed]
+#           example: completed
+#         created_at:
+#           type: string
+#           format: date-time
+#           example: "2025-11-06T10:00:00Z"
+
+openapi: 3.0.0
+info:
+  title: Transaction Service API
+  version: 1.0.0
+  description: |
+    REST API for the Transaction Service in the Scalable Banking system.
+    Handles money transfers, deposits, queries, and exposes Prometheus metrics.
+
+servers:
+  - url: /
+    description: Minikube or local relative path (auto works inside cluster)
+  # - url: http://localhost:8082
+  #   description: Local Docker Compose
+
+paths:
+  /transactions:
+    get:
+      summary: List all transactions or filter by account_id
+      operationId: listTransactions
+      parameters:
+        - in: query
+          name: account_id
+          schema:
+            type: integer
+          required: false
+          description: Filter transactions by account ID
+      responses:
+        '200':
+          description: List of transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  count:
+                    type: integer
+                    example: 2
+                  transactions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+        '500':
+          description: Server error
+
+  /transactions/account/{accountId}:
+    get:
+      summary: Get transactions for a specific account
+      operationId: getTransactionsByAccountId
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: integer
+            example: 101
+          description: Account ID to fetch transactions for
+      responses:
+        '200':
+          description: Transactions found for the account
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  count:
+                    type: integer
+                    example: 2
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+        '404':
+          description: No transactions found for the given account
+        '500':
+          description: Server error
+
+  /transactions/{id}:
+    get:
+      summary: Fetch a transaction by transaction ID
+      operationId: getTransactionById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "7e0dab25-ab32-42de-bcbd-19f3d431b812"
+      responses:
+        '200':
+          description: Transaction found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  transaction:
+                    $ref: '#/components/schemas/Transaction'
+        '404':
+          description: Transaction not found
+        '500':
+          description: Server error
+
+  /transactions/transfer:
+    post:
+      summary: Create a transfer (idempotent)
+      operationId: createTransfer
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+          description: Unique key to ensure idempotent request handling.
+        - in: header
+          name: X-Correlation-ID
+          required: false
+          schema:
+            type: string
+          description: Correlation ID for traceability.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_account_id, to_account_id, amount]
+              properties:
+                from_account_id:
+                  type: integer
+                  example: 101
+                to_account_id:
+                  type: integer
+                  example: 202
+                amount:
+                  type: number
+                  format: float
+                  example: 250.50
+      responses:
+        '201':
+          description: Transfer created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '400':
+          description: Bad request or business rule violation
+        '409':
+          description: Duplicate request (idempotency conflict)
+        '500':
+          description: Server error
+
+  /transactions/deposit:
+    post:
+      summary: Deposit into an account (idempotent)
+      operationId: depositFunds
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+          description: Unique key to ensure idempotent request handling.
+        - in: header
+          name: X-Correlation-ID
+          required: false
+          schema:
+            type: string
+          description: Correlation ID for traceability.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account_id, amount]
+              properties:
+                account_id:
+                  type: integer
+                  example: 101
+                amount:
+                  type: number
+                  example: 500.0
+      responses:
+        '201':
+          description: Deposit created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '400':
+          description: Invalid account or amount
+        '409':
+          description: Duplicate request (idempotency conflict)
+        '500':
+          description: Server error
+
+  /metrics:
+    get:
+      summary: Expose Prometheus metrics
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Prometheus metrics endpoint
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  # HELP http_requests_total The total number of HTTP requests.
+                  # TYPE http_requests_total counter
+                  http_requests_total{method="get",path="/metrics"} 10
+
+components:
+  schemas:
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "7e0dab25-ab32-42de-bcbd-19f3d431b812"
+        type:
+          type: string
+          enum: [transfer, deposit]
+        from_account_id:
+          type: integer
+          nullable: true
+          example: 101
+        to_account_id:
+          type: integer
+          nullable: true
+          example: 202
+        amount:
+          type: number
+          example: 250.50
+        status:
+          type: string
+          enum: [pending, completed, failed]
+          example: completed
+        created_at:
+          type: string
+          format: date-time
+          example: "2025-11-06T10:00:00Z"

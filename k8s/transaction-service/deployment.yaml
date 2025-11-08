@@ -1,0 +1,95 @@
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: transaction-service
+#   namespace: banking
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: transaction-service
+#   template:
+#     metadata:
+#       labels:
+#         app: transaction-service
+#     spec:
+#       containers:
+#         - name: transaction-service
+#           image: transaction-service:latest
+#           imagePullPolicy: IfNotPresent
+#           ports:
+#             - containerPort: 8082
+#           envFrom:
+#             - configMapRef:
+#                 name: transaction-config
+#           volumeMounts:
+#             - name: openapi-volume        # 👈 volume name
+#               mountPath: /app/openapi.yaml  # 👈 where file will appear
+#               subPath: openapi.yaml         # 👈 mount only the file, not a directory
+#       volumes:
+#         - name: openapi-volume
+#           configMap:
+#             name: transaction-openapi       # 👈 name must match the ConfigMap you created
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transaction-service
+  namespace: banking
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transaction-service
+  template:
+    metadata:
+      labels:
+        app: transaction-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8082"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: transaction-service
+          image: transaction-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8082
+          env:
+            # ✅ RabbitMQ URL for connection inside cluster
+            - name: RABBITMQ_URL
+              value: amqp://guest:guest@rabbitmq:5672
+
+            # ✅ Postgres DB connection details
+            - name: PGHOST
+              value: transaction-db
+            - name: PGUSER
+              value: txn_user
+            - name: PGPASSWORD
+              value: txn_pass
+            - name: PGDATABASE
+              value: transaction_db
+            - name: PGPORT
+              value: "5432"
+
+            # ✅ Account Service URL (internal)
+            - name: ACCOUNT_SERVICE_URL
+              value: http://account-service:8083
+
+            # ✅ Node environment
+            - name: NODE_ENV
+              value: production
+
+          envFrom:
+            - configMapRef:
+                name: transaction-config
+
+          volumeMounts:
+            - name: openapi-volume
+              mountPath: /app/openapi.yaml
+              subPath: openapi.yaml
+      volumes:
+        - name: openapi-volume
+          configMap:
+            name: transaction-openapi

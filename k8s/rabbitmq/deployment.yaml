@@ -1,0 +1,112 @@
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: rabbitmq
+#   namespace: banking
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: rabbitmq
+#   template:
+#     metadata:
+#       labels:
+#         app: rabbitmq
+#     spec:
+#       containers:
+#         - name: rabbitmq
+#           image: rabbitmq:3-management
+#           ports:
+#             - containerPort: 5672
+#             - containerPort: 15672
+#           env:
+#             - name: RABBITMQ_DEFAULT_USER
+#               value: "guest"
+#             - name: RABBITMQ_DEFAULT_PASS
+#               value: "guest"
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: rabbitmq
+#   namespace: banking
+# spec:
+#   selector:
+#     app: rabbitmq
+#   ports:
+#     - name: amqp   # 👈 add this
+#       port: 5672
+#       targetPort: 5672
+#     - name: http   # 👈 add this
+#       port: 15672
+#       targetPort: 15672
+#   type: ClusterIP
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: banking
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3-management
+          ports:
+            - containerPort: 5672   # AMQP (used by services)
+            - containerPort: 15672  # HTTP management UI
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              value: "guest"
+            - name: RABBITMQ_DEFAULT_PASS
+              value: "guest"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 15672
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 15672
+            initialDelaySeconds: 20
+            periodSeconds: 10
+
+          # ✅ Mount a writable emptyDir volume to persist runtime data
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+
+      # ✅ Define the volume
+      volumes:
+        - name: rabbitmq-data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: banking
+spec:
+  selector:
+    app: rabbitmq
+  type: NodePort   # ✅ permanently accessible from host
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+      nodePort: 30672   # ✅ fixed port for internal AMQP
+    - name: management
+      port: 15672
+      targetPort: 15672
+      nodePort: 31672   # ✅ fixed port for RabbitMQ UI
